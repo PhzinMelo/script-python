@@ -37,7 +37,7 @@ sudo apt update
 sudo apt install adb scrcpy
 ```
 
-Habilite a **Depuração USB** no Samsung S21:
+Habilite a **Depuração USB** 
 - Configurações → Sobre o telefone → toque 7x em "Número da versão"
 - Configurações → Opções do desenvolvedor → Depuração USB: ativado
 
