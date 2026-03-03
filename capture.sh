@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# capture.sh — Script Cola | Captura tela do Android e processa
+# capture.sh — Script Cola | Captura tela do Android via ADB
 #
 # Uso:
-#   ./capture.sh image [arquivo.png]       # captura imagem
-#   ./capture.sh ocr   [arquivo.png] [saida_sem_extensao]  # captura + OCR
+#   ./capture.sh image [arquivo.png]
+#   ./capture.sh ocr   [arquivo.png] [base_saida]
 #
 # Exemplos:
 #   ./capture.sh image screenshot1.png
@@ -14,7 +14,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG="$SCRIPT_DIR/config.env"
 
-# ── Carrega configurações ─────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 if [[ ! -f "$CONFIG" ]]; then
   echo "[ERRO] config.env não encontrado em $SCRIPT_DIR"
   exit 1
@@ -22,7 +22,7 @@ fi
 source "$CONFIG"
 PROVIDER="${PROVIDER:-gemini}"
 
-# ── Verifica dependências ─────────────────────────────────────────────────────
+# ── Dependências ──────────────────────────────────────────────────────────────
 for cmd in adb python3; do
   if ! command -v "$cmd" &>/dev/null; then
     echo "[ERRO] Dependência ausente: $cmd"
@@ -47,7 +47,7 @@ case "$MODE" in
     ;;
 esac
 
-# ── Captura a tela via ADB ────────────────────────────────────────────────────
+# ── Captura via ADB ───────────────────────────────────────────────────────────
 echo "[INFO] Capturando tela → $SCREENSHOT_NAME"
 adb exec-out screencap -p > "$SCREENSHOT"
 
@@ -56,7 +56,7 @@ if [[ ! -s "$SCREENSHOT" ]]; then
   exit 1
 fi
 
-# ── Processa conforme o modo ──────────────────────────────────────────────────
+# ── Processa ──────────────────────────────────────────────────────────────────
 if [[ "$MODE" == "image" ]]; then
   echo "[INFO] Imagem salva: $SCREENSHOT"
 
@@ -71,7 +71,7 @@ elif [[ "$MODE" == "ocr" ]]; then
   tesseract "$SCREENSHOT" "$OCR_OUTPUT" -l por+eng 2>/dev/null || true
 
   if [[ ! -s "${OCR_OUTPUT}.txt" ]]; then
-    echo "[AVISO] OCR não encontrou texto na imagem."
+    echo "[AVISO] OCR não encontrou texto."
   else
     CHARS=$(wc -c < "${OCR_OUTPUT}.txt")
     echo "[INFO] OCR concluído: ${OCR_OUTPUT}.txt ($CHARS bytes)"
