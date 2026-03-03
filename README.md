@@ -1,47 +1,58 @@
-# 📱 Android Screen AI — Automatize capturas e consultas à IA
+# Script Cola 📋
 
-Sistema que captura a tela do seu Android via ADB e envia para Gemini ou Copilot automaticamente.
-
----
-
-## 🗂️ Arquivos
-
-| Arquivo | Função |
-|---|---|
-| `capture.sh` | Script principal (captura + envia para IA) |
-| `send_to_ai.py` | Comunicação com Gemini / Copilot |
-| `config.env` | Chaves de API e provedor padrão |
+Capture a tela do seu dispositivo Android, acumule prints e envie tudo de uma vez para uma IA — direto do terminal, sem abrir navegador ou copiar nada manualmente.
 
 ---
 
-## ⚡ Uso rápido
+## Como funciona
 
-```bash
-# Enviar screenshot como IMAGEM para a IA (Gemini)
-./capture.sh image
+1. Abra um terminal e rode `python3 daemon.py`
+2. Use os atalhos de teclado para acumular capturas
+3. Ao finalizar, pressione **Shift+V** para enviar tudo à IA
+4. A resposta aparece no mesmo terminal
 
-# Extrair texto via OCR e enviar para a IA
-./capture.sh text
+---
+
+## Atalhos
+
+| Atalho    | Ação                                              |
+|-----------|---------------------------------------------------|
+| `Shift+Z` | **Nova sessão** — limpa todas as capturas         |
+| `Shift+X` | **Capturar imagem** — salva screenshot numerado   |
+| `Shift+C` | **Capturar OCR** — extrai texto da tela           |
+| `Shift+V` | **Enviar para IA** — manda tudo acumulado         |
+| `Esc`     | Encerrar o daemon                                 |
+
+### Exemplo de uso
+
+```
+[terminal]
+$ python3 daemon.py
+
+# Na tela do celular aparece algo que você quer analisar:
+Shift+Z   →  nova sessão
+Shift+X   →  captura a tela como imagem
+Shift+C   →  captura a tela e extrai o texto
+Shift+X   →  captura mais uma tela como imagem
+Shift+V   →  envia as 2 imagens + 1 texto para a IA
+
+RESPOSTA DA IA:
+────────────────────────────────────────────────────────────
+[resposta aparece aqui]
+────────────────────────────────────────────────────────────
 ```
 
-A resposta aparece diretamente no terminal, de forma limpa e objetiva.
-
 ---
 
-## 🔧 Instalação de dependências
+## Instalação
 
-### 1. ADB e scrcpy
+### 1. ADB
 
 ```bash
-sudo apt update
-sudo apt install adb scrcpy
+sudo apt install adb
 ```
 
-Habilite a **Depuração USB** 
-- Configurações → Sobre o telefone → toque 7x em "Número da versão"
-- Configurações → Opções do desenvolvedor → Depuração USB: ativado
-
-Conecte o cabo e confirme o par de RSA no celular. Teste com:
+Conecte o dispositivo via USB e habilite **Depuração USB** nas opções de desenvolvedor. Verifique:
 
 ```bash
 adb devices
@@ -50,98 +61,81 @@ adb devices
 ### 2. Tesseract OCR
 
 ```bash
-sudo apt install tesseract-ocr tesseract-ocr-por tesseract-ocr-eng
+sudo apt install tesseract-ocr tesseract-ocr-por
 ```
 
-### 3. Python 3 e dependências
+### 3. Python e dependências
 
 ```bash
 sudo apt install python3 python3-pip
-pip install requests
+pip install requests pynput
 ```
 
-### 4. Torne o script executável
+---
+
+## Configuração
+
+Crie o arquivo `config.env` na mesma pasta dos scripts:
+
+```env
+# Provedor padrão: gemini | copilot
+PROVIDER=gemini
+
+# Modelo do Gemini — altere aqui sem precisar editar o código
+MODEL=gemini-flash-latest
+
+# Chave da API do Gemini (https://aistudio.google.com/app/apikey)
+GEMINI_API_KEY=SUA_CHAVE_AQUI
+
+# Chave da API do OpenAI/Copilot (https://platform.openai.com/api-keys)
+COPILOT_API_KEY=SUA_CHAVE_AQUI
+```
+
+> ⚠️ **Não suba o `config.env` para repositórios públicos.** Adicione ao `.gitignore`:
+> ```
+> config.env
+> *.png
+> *.txt
+> ```
+
+---
+
+## Estrutura de arquivos
+
+```
+script-cola/
+├── daemon.py       ← rodar este para iniciar
+├── capture.sh      ← chamado automaticamente pelo daemon
+├── send_to_ai.py   ← chamado automaticamente no Shift+V
+├── config.env      ← suas chaves e configurações
+└── README.md
+```
+
+Arquivos gerados automaticamente durante o uso:
+
+```
+screenshot1.png, screenshot2.png…  ← capturas de tela
+ocr1.txt, ocr2.txt…                ← textos extraídos
+```
+
+---
+
+## Provedores suportados
+
+| Recurso         | Gemini | Copilot (OpenAI) |
+|-----------------|--------|------------------|
+| Envio de imagem | ✅     | ❌               |
+| Envio de texto  | ✅     | ✅               |
+| Fallback auto   | ✅     | ✅               |
+
+Se o Gemini falhar, o sistema tenta automaticamente o Copilot (com retry de até 3×).
+Se houver apenas imagens sem texto OCR, o Copilot é ignorado no fallback.
+
+---
+
+## Iniciando
 
 ```bash
 chmod +x capture.sh
+python3 daemon.py
 ```
-
-### 5. Configure suas chaves de API
-
-Edite o `config.env`:
-
-```bash
-GEMINI_API_KEY="sua-chave-aqui"
-COPILOT_API_KEY="sua-chave-aqui"
-PROVIDER="gemini"   # ou "copilot"
-```
-
-- **Gemini API Key**: https://aistudio.google.com/app/apikey
-- **Copilot/OpenAI Key**: https://platform.openai.com/api-keys
-
----
-
-## 🤖 Comportamento do sistema
-
-### Modos de captura
-
-| Comando | O que faz |
-|---|---|
-| `./capture.sh image` | Captura PNG → envia imagem para Gemini → exibe resposta |
-| `./capture.sh text` | Captura PNG → OCR → envia texto para Gemini ou Copilot → exibe resposta |
-
-### Suporte por provedor
-
-| Recurso | Gemini | Copilot |
-|---|---|---|
-| Envio de imagem | ✅ | ❌ |
-| Envio de texto (OCR) | ✅ | ✅ |
-| Fallback automático | ✅ | ✅ |
-
-> **Nota:** Se você usar `./capture.sh image` com `PROVIDER=copilot`, o sistema converte automaticamente para OCR antes de enviar.
-
-### Fallback automático
-
-1. OCR retorna vazio + provedor é Gemini → envia a imagem diretamente.
-2. Provedor principal falha (erro de API, quota, timeout) → tenta até **3x** com intervalo de **5s**.
-3. Se ainda falhar, troca automaticamente para o outro provedor.
-
-### Saída normalizada
-
-Independente do formato JSON retornado pela API, o script extrai apenas o texto e imprime de forma limpa:
-
-```
-────────────────────────────────────────────────────────────
-RESPOSTA DA IA:
-────────────────────────────────────────────────────────────
-[texto da IA aqui]
-────────────────────────────────────────────────────────────
-```
-
-### Respostas concisas
-
-O prompt enviado instrui a IA a ser **objetiva e direta**, sem repetir a pergunta ou adicionar rodeios desnecessários.
-
----
-
-## 🖥️ Transmissão da tela com scrcpy
-
-Para espelhar a tela enquanto usa o sistema:
-
-```bash
-scrcpy &
-```
-
-Você pode usar as capturas `./capture.sh` enquanto o scrcpy exibe a tela em tempo real.
-
----
-
-## 🛠️ Problemas comuns
-
-| Problema | Solução |
-|---|---|
-| `adb devices` não lista o celular | Reconecte o cabo, confirme a depuração USB no celular |
-| Screenshot vazio | Desbloqueie a tela do celular antes de capturar |
-| OCR retorna lixo | Ajuste o idioma: edite `capture.sh` e mude `-l por+eng` |
-| Erro 401 na API | Verifique a chave em `config.env` |
-| Erro 429 / quota | O sistema fará retry automático e trocará de provedor |
