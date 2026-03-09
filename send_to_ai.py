@@ -1,30 +1,22 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-send_to_ai.py — Script Cola v4.0
+send_to_ai.py — Script Cola v5.0
 Envia imagens e/ou textos para Gemini ou OpenRouter.
 
 Uso:
-  python3 send_to_ai.py --image foto1.png --image foto2.png --text "ocr..."
-  python3 send_to_ai.py --provider gemini --model gemini-2.5-flash --image tela.png
-  python3 send_to_ai.py --provider openrouter --model mistralai/mistral-7b-instruct --text "..."
-
-Flags repetíveis: --image, --text
-
-Consultar modelos disponíveis:
-  Gemini:
-    curl "https://generativelanguage.googleapis.com/v1beta/models?key=SUA_CHAVE"
-  OpenRouter:
-    curl -H "Authorization: Bearer SUA_CHAVE" https://openrouter.ai/api/v1/models
+  python send_to_ai.py --image foto1.png --text "ocr..."
+  python send_to_ai.py --provider gemini --model gemini-2.5-flash --image tela.png
+  python send_to_ai.py --provider openrouter --model mistralai/mistral-7b-instruct --text "..."
 """
 
-import sys, os, argparse, time, base64, json, subprocess, tempfile
+import sys, os, argparse, time, base64, json, subprocess, tempfile, mimetypes
 import requests
 from pathlib import Path
 
-# ── UTF-8 ─────────────────────────────────────────────────────────────────────
-sys.stdout.reconfigure(encoding="utf-8")
-sys.stderr.reconfigure(encoding="utf-8")
+# ── UTF-8 (essencial no Windows) ──────────────────────────────────────────────
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 # ── Config ────────────────────────────────────────────────────────────────────
 SCRIPT_DIR  = Path(__file__).parent
@@ -51,24 +43,22 @@ OPENROUTER_KEY = cfg.get("OPENROUTER_API_KEY", os.environ.get("OPENROUTER_API_KE
 DEFAULT_PROVIDER = cfg.get("PROVIDER", "gemini").lower()
 DEFAULT_MODEL    = cfg.get("MODEL",    "gemini-2.5-flash")
 
-# ── Modelos de fallback ───────────────────────────────────────────────────────
-# Gemini: tentados em sequência se o modelo primário falhar
+# Configuráveis via config.env
+TIMEOUT     = int(cfg.get("TIMEOUT",    "20"))
+MAX_RETRIES = int(cfg.get("MAX_RETRIES", "2"))
+MAX_TOKENS  = int(cfg.get("MAX_TOKENS", "400"))
+IMG_MAX_W   = int(cfg.get("IMAGE_MAX_SIZE", "1280"))
+IMG_QUALITY = int(cfg.get("IMAGE_QUALITY",  "80"))
+
+# Fallback enxuto — apenas 2 modelos por provedor para resposta rápida
 GEMINI_FALLBACK_MODELS = [
     "gemini-2.5-flash",
-    "gemini-2.5-pro",
     "gemini-flash-latest",
-    "gemini-pro-latest",
 ]
-
-# OpenRouter: tentados em sequência se o modelo primário falhar
 OPENROUTER_FALLBACK_MODELS = [
     "mistralai/mistral-7b-instruct",
     "meta-llama/llama-3-70b-instruct",
-    "anthropic/claude-3.5-sonnet",
 ]
-
-MAX_RETRIES = 3
-RETRY_DELAY = 5
 
 SYSTEM_PROMPT = (
     "Você é um assistente direto e objetivo. "
@@ -76,19 +66,79 @@ SYSTEM_PROMPT = (
     "Use português do Brasil quando possível."
 )
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def encode_image(path: str) -> str:
-    with open(path, "rb") as f:
-        return base64.b64encode(f.read()).decode("utf-8")
+# ── Pillow opcional (redimensionamento) ───────────────────────────────────────
+try:
+    from PIL import Image as PILImage
+    import io as _io
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
-def extract_text(provider: str, data: dict) -> str:
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def prepare_image(path: str) -> tuple[str, str]:
+    """
+    Redimensiona e comprime a imagem se necessário.
+    Retorna (base64_data, mime_type).
+    Detecta MIME automaticamente via mimetypes.
+    """
+    mime, _ = mimetypes.guess_type(path)
+    mime = mime or "image/png"
+
+    if HAS_PIL:
+        img = PILImage.open(path).convert("RGB")
+        # Redimensiona se largura > IMG_MAX_W
+        if img.width > IMG_MAX_W:
+            ratio  = IMG_MAX_W / img.width
+            new_h  = int(img.height * ratio)
+            img    = img.resize((IMG_MAX_W, new_h), PILImage.LANCZOS)
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=IMG_QUALITY, optimize=True)
+        data = base64.b64encode(buf.getvalue()).decode("utf-8")
+        mime = "image/jpeg"
+    else:
+        with open(path, "rb") as f:
+            data = base64.b64encode(f.read()).decode("utf-8")
+
+    return data, mime
+
+
+def extract_gemini_text(data: dict) -> str:
+    """Concatena todos os parts de todos os candidates."""
     try:
-        if provider == "gemini":
-            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        else:
-            return data["choices"][0]["message"]["content"].strip()
+        parts = []
+        for candidate in data.get("candidates", []):
+            finish = candidate.get("finishReason", "STOP")
+            if finish not in ("STOP", "MAX_TOKENS"):
+                continue
+            for part in candidate.get("content", {}).get("parts", []):
+                t = part.get("text", "").strip()
+                if t:
+                    parts.append(t)
+        if parts:
+            return "\n".join(parts)
+        # Resposta bloqueada ou vazia
+        blocked = data.get("promptFeedback", {}).get("blockReason", "")
+        if blocked:
+            return f"[Resposta bloqueada pelo Gemini: {blocked}]"
+        return "[Resposta vazia do Gemini]"
+    except Exception:
+        return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def extract_openrouter_text(data: dict) -> str:
+    try:
+        return data["choices"][0]["message"]["content"].strip()
     except (KeyError, IndexError, TypeError):
         return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def safe_json(resp) -> dict:
+    """Tenta decodificar JSON; retorna dict com erro em caso de falha."""
+    try:
+        return resp.json()
+    except Exception:
+        return {"error": resp.text[:300]}
+
 
 def is_rate_limit(data: dict) -> bool:
     dump = json.dumps(data).lower()
@@ -96,22 +146,34 @@ def is_rate_limit(data: dict) -> bool:
         "quota", "rate_limit", "rate limit", "resource_exhausted", "429", "too many"
     ])
 
+
 def ocr_image(img_path: str) -> str:
-    """Roda tesseract na imagem e devolve o texto extraído."""
-    with tempfile.NamedTemporaryFile(suffix="", delete=False) as tmp:
-        base = tmp.name
+    """OCR via Tesseract com parâmetros rápidos (PSM 6 = bloco uniforme)."""
+    tmp_base = Path(tempfile.mktemp())
     try:
-        subprocess.run(
-            ["tesseract", img_path, base, "-l", "por+eng"],
-            capture_output=True, check=False
+        result = subprocess.run(
+            ["tesseract", img_path, str(tmp_base),
+             "-l", "por+eng", "--psm", "6", "--oem", "1"],
+            capture_output=True, timeout=15, check=False
         )
-        txt_file = Path(base + ".txt")
-        return txt_file.read_text(encoding="utf-8").strip() if txt_file.exists() else ""
+        txt_file = Path(str(tmp_base) + ".txt")
+        if txt_file.exists():
+            text = txt_file.read_text(encoding="utf-8").strip()
+            return text if text else ""
+        return ""
+    except subprocess.TimeoutExpired:
+        print("[AVISO] OCR demorou demais — ignorado.", file=sys.stderr)
+        return ""
+    except FileNotFoundError:
+        print("[AVISO] Tesseract não encontrado — pulando OCR.", file=sys.stderr)
+        return ""
     finally:
-        for ext in (".txt", ""):
-            p = Path(base + ext)
+        for suffix in (".txt", ""):
+            p = Path(str(tmp_base) + suffix)
             if p.exists():
-                p.unlink(missing_ok=True)
+                try: p.unlink()
+                except Exception: pass
+
 
 # ── Chamada Gemini ────────────────────────────────────────────────────────────
 def call_gemini(model: str, images: list, texts: list) -> str:
@@ -123,39 +185,47 @@ def call_gemini(model: str, images: list, texts: list) -> str:
     parts = [{"text": SYSTEM_PROMPT}]
 
     for img in images:
-        parts.append({"inline_data": {
-            "mime_type": "image/png",
-            "data": encode_image(img)
-        }})
+        b64, mime = prepare_image(img)
+        parts.append({"inline_data": {"mime_type": mime, "data": b64}})
     if images:
         parts.append({"text": "Analise as imagens acima de forma útil e concisa."})
     if texts:
         parts.append({"text": "\n\n---\n\n".join(texts)})
 
-    resp = requests.post(url, json={"contents": [{"parts": parts}]}, timeout=90)
+    payload = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {"maxOutputTokens": MAX_TOKENS},
+    }
+
+    try:
+        resp = requests.post(url, json=payload, timeout=TIMEOUT)
+    except requests.exceptions.Timeout:
+        raise RuntimeError(f"Gemini [{model}] timeout após {TIMEOUT}s")
+    except requests.exceptions.ConnectionError as e:
+        raise RuntimeError(f"Gemini [{model}] erro de rede: {e}")
+
+    data = safe_json(resp)
     if resp.status_code != 200:
-        data = resp.json()
         raise RuntimeError(
             ("RATE_LIMIT: " if is_rate_limit(data) else "") +
-            f"Gemini [{model}] HTTP {resp.status_code}: {resp.text[:200]}"
+            f"Gemini [{model}] HTTP {resp.status_code}: {str(data)[:200]}"
         )
-    return extract_text("gemini", resp.json())
+    return extract_gemini_text(data)
+
 
 # ── Chamada OpenRouter ────────────────────────────────────────────────────────
 def call_openrouter(model: str, images: list, texts: list) -> str:
     if not OPENROUTER_KEY:
         raise ValueError("OPENROUTER_API_KEY não configurado em config.env")
 
-    # OpenRouter não aceita imagens → OCR automático
     all_texts = list(texts)
     for img in images:
-        print(f"[INFO] OCR automático em {Path(img).name} (OpenRouter não aceita imagens)…",
-              flush=True)
+        print(f"[INFO] OCR automático: {Path(img).name}", flush=True)
         ocr = ocr_image(img)
         if ocr:
-            all_texts.append(f"[Texto extraído via OCR de {Path(img).name}]\n{ocr}")
+            all_texts.append(f"[OCR de {Path(img).name}]\n{ocr}")
         else:
-            print(f"[AVISO] OCR vazio para {img} — imagem ignorada.", file=sys.stderr)
+            print(f"[AVISO] OCR vazio para {Path(img).name} — ignorado.", file=sys.stderr)
 
     if not all_texts:
         raise RuntimeError("OpenRouter: sem conteúdo para enviar após OCR.")
@@ -172,19 +242,27 @@ def call_openrouter(model: str, images: list, texts: list) -> str:
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user",   "content": "\n\n---\n\n".join(all_texts)},
         ],
-        "max_tokens": 1024,
+        "max_tokens": MAX_TOKENS,
     }
-    resp = requests.post(
-        cfg.get("OPENROUTER_ENDPOINT", "https://openrouter.ai/api/v1/chat/completions"),
-        headers=headers, json=payload, timeout=90
-    )
+
+    try:
+        resp = requests.post(
+            cfg.get("OPENROUTER_ENDPOINT", "https://openrouter.ai/api/v1/chat/completions"),
+            headers=headers, json=payload, timeout=TIMEOUT
+        )
+    except requests.exceptions.Timeout:
+        raise RuntimeError(f"OpenRouter [{model}] timeout após {TIMEOUT}s")
+    except requests.exceptions.ConnectionError as e:
+        raise RuntimeError(f"OpenRouter [{model}] erro de rede: {e}")
+
+    data = safe_json(resp)
     if resp.status_code != 200:
-        data = resp.json()
         raise RuntimeError(
             ("RATE_LIMIT: " if is_rate_limit(data) else "") +
-            f"OpenRouter [{model}] HTTP {resp.status_code}: {resp.text[:200]}"
+            f"OpenRouter [{model}] HTTP {resp.status_code}: {str(data)[:200]}"
         )
-    return extract_text("openrouter", resp.json())
+    return extract_openrouter_text(data)
+
 
 # ── Dispatcher ────────────────────────────────────────────────────────────────
 CALLERS = {
@@ -192,67 +270,66 @@ CALLERS = {
     "openrouter": call_openrouter,
 }
 
-# ── Retry num único provedor+modelo ──────────────────────────────────────────
+
+# ── Retry enxuto ─────────────────────────────────────────────────────────────
 def try_once(provider: str, model: str, images: list, texts: list) -> str:
     caller = CALLERS.get(provider)
     if not caller:
         raise ValueError(f"Provedor desconhecido: '{provider}'. Use: gemini, openrouter.")
+    last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            print(f"[INFO] {provider.upper()} / {model}  (tentativa {attempt}/{MAX_RETRIES})",
-                  flush=True)
             return caller(model, images, texts)
         except RuntimeError as e:
-            print(f"[AVISO] {str(e)[:140]}", file=sys.stderr)
+            last_err = e
+            print(f"[AVISO] tentativa {attempt}/{MAX_RETRIES}: {str(e)[:100]}", file=sys.stderr)
             if attempt < MAX_RETRIES:
-                print(f"[INFO] Aguardando {RETRY_DELAY}s…", flush=True)
-                time.sleep(RETRY_DELAY)
-            else:
-                raise
+                time.sleep(2)
+    raise last_err
 
-# ── Fallback inteligente ──────────────────────────────────────────────────────
+
+# ── Fallback enxuto ───────────────────────────────────────────────────────────
 def send(primary_provider: str, primary_model: str, images: list, texts: list) -> str:
     """
-    Estratégia de fallback:
-      1. Tenta primary_provider / primary_model (com retry até MAX_RETRIES)
-      2. Se Gemini: tenta demais modelos de GEMINI_FALLBACK_MODELS
-         Se OpenRouter: tenta demais modelos de OPENROUTER_FALLBACK_MODELS
-      3. Se todos falharam no provedor primário → tenta o outro provedor
-         (com seus próprios modelos de fallback)
+    Ordem de tentativas (rápido e direto):
+      1. primary_provider / primary_model
+      2. Um modelo de fallback do mesmo provedor
+      3. Provedor alternativo com seu primeiro modelo de fallback
     """
-    # ── 1. modelo solicitado
+    fallback_map = {
+        "gemini":     GEMINI_FALLBACK_MODELS,
+        "openrouter": OPENROUTER_FALLBACK_MODELS,
+    }
+
+    # 1. Modelo solicitado
     try:
         return try_once(primary_provider, primary_model, images, texts)
     except Exception as e:
         print(f"[AVISO] {primary_provider}/{primary_model} falhou: {e}", file=sys.stderr)
 
-    # ── 2. outros modelos do mesmo provedor
-    fallback_map = {
-        "gemini":     GEMINI_FALLBACK_MODELS,
-        "openrouter": OPENROUTER_FALLBACK_MODELS,
-    }
+    # 2. Primeiro fallback do mesmo provedor (não repetir o modelo já tentado)
     for fb_model in fallback_map.get(primary_provider, []):
         if fb_model == primary_model:
             continue
+        print(f"[INFO] Fallback → {primary_provider}/{fb_model}", flush=True)
         try:
-            print(f"[INFO] Fallback {primary_provider} → {fb_model}", flush=True)
             return try_once(primary_provider, fb_model, images, texts)
         except Exception as e:
             print(f"[AVISO] {primary_provider}/{fb_model} falhou: {e}", file=sys.stderr)
+        break  # tenta só 1 fallback no mesmo provedor
 
-    # ── 3. provedor alternativo
-    alt_provider = "openrouter" if primary_provider == "gemini" else "gemini"
-    alt_models   = fallback_map.get(alt_provider, [])
-    print(f"[INFO] Todos os modelos de '{primary_provider}' falharam. "
-          f"Tentando {alt_provider.upper()}…", flush=True)
-    for fb_model in alt_models:
+    # 3. Provedor alternativo (apenas o primeiro modelo)
+    alt = "openrouter" if primary_provider == "gemini" else "gemini"
+    alt_model = fallback_map.get(alt, [""])[0]
+    if alt_model:
+        print(f"[INFO] Fallback final → {alt}/{alt_model}", flush=True)
         try:
-            print(f"[INFO] Fallback {alt_provider} → {fb_model}", flush=True)
-            return try_once(alt_provider, fb_model, images, texts)
+            return try_once(alt, alt_model, images, texts)
         except Exception as e:
-            print(f"[AVISO] {alt_provider}/{fb_model} falhou: {e}", file=sys.stderr)
+            print(f"[AVISO] {alt}/{alt_model} falhou: {e}", file=sys.stderr)
 
-    raise RuntimeError("Todos os provedores e modelos falharam.")
+    raise RuntimeError("Todos os provedores falharam.")
+
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 def main():
@@ -273,11 +350,19 @@ def main():
             print(f"[ERRO] Arquivo não encontrado: {img}", file=sys.stderr)
             sys.exit(1)
 
-    print(f"[INFO] Provedor: {args.provider.upper()} | Modelo: {args.model} | "
-          f"Imagens: {len(args.image)} | Textos: {len(args.text)}", flush=True)
+    pil_status = "sim" if HAS_PIL else "nao (pip install pillow)"
+    print(f"[INFO] Provider  : {args.provider.upper()}", flush=True)
+    print(f"[INFO] Model     : {args.model}", flush=True)
+    print(f"[INFO] Images    : {len(args.image)}", flush=True)
+    print(f"[INFO] Texts     : {len(args.text)}", flush=True)
+    print(f"[INFO] Pillow    : {pil_status}", flush=True)
+    print(f"[INFO] Timeout   : {TIMEOUT}s  |  Max retries: {MAX_RETRIES}", flush=True)
 
+    t0 = time.time()
     try:
         response = send(args.provider, args.model, args.image, args.text)
+        elapsed = time.time() - t0
+        print(f"[INFO] Response time: {elapsed:.1f}s", flush=True)
         print("\n" + "─" * 60)
         print("RESPOSTA DA IA:")
         print("─" * 60)
